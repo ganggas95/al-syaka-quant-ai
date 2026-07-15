@@ -1,0 +1,10 @@
+[project]
+name = "al-syaka-feature-engineering"
+version = "0.1.0"
+description = "Feature extraction and transformation from OHLC data"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26.0",
+    "pandas>=2.2.0",
+    "al-syaka-indicators",
+]

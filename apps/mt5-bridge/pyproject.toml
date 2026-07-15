@@ -1,0 +1,10 @@
+[project]
+name = "al-syaka-mt5-bridge"
+version = "0.1.0"
+description = "MetaTrader 5 Bridge — connector, order manager, auto trading"
+requires-python = ">=3.11"
+dependencies = [
+    "al-syaka-common",
+    "al-syaka-risk",
+    "pydantic>=2.0.0",
+]

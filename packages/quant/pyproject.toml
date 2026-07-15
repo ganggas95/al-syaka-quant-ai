@@ -1,0 +1,12 @@
+[project]
+name = "al-syaka-quant"
+version = "0.1.0"
+description = "Quantitative trading utilities and strategy primitives"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26.0",
+    "pandas>=2.2.0",
+    "al-syaka-indicators",
+    "al-syaka-feature-engineering",
+    "al-syaka-risk",
+]

@@ -1,0 +1,15 @@
+{
+  "name": "al-syaka-quant-ai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI-powered Market Intelligence & Trading Signal Platform",
+  "scripts": {
+    "dev:dashboard": "pnpm --filter dashboard dev",
+    "build:dashboard": "pnpm --filter dashboard build",
+    "lint:dashboard": "pnpm --filter dashboard lint"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "pnpm": ">=9.0.0"
+  }
+}

@@ -1,0 +1,9 @@
+[project]
+name = "al-syaka-indicators"
+version = "0.1.0"
+description = "Technical indicators library — pure Python implementation"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26.0",
+    "pandas>=2.2.0",
+]
