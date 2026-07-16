@@ -1,25 +1,18 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { Candle } from "@/lib/api";
 import {
-  createChart,
-  IChartApi,
-  ISeriesApi,
-  CandlestickData,
-  LineData,
-  UTCTimestamp,
+    CandlestickData,
+    createChart,
+    IChartApi,
+    ISeriesApi,
+    LineData,
+    UTCTimestamp,
 } from "lightweight-charts";
-
-interface CandleData {
-  time: string;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-}
+import { useEffect, useRef } from "react";
 
 interface SignalCandlestickProps {
-  data: CandleData[];
+  data: Candle[];
   entryPrice?: number | null;
   stopLoss?: number | null;
   takeProfit?: number | null;
@@ -78,7 +71,7 @@ export function SignalCandlestick({
     });
 
     const formattedData: CandlestickData[] = data.map((d) => ({
-      time: (new Date(d.time).getTime() / 1000) as UTCTimestamp,
+      time: (new Date(d.timestamp).getTime() / 1000) as UTCTimestamp,
       open: d.open,
       high: d.high,
       low: d.low,
