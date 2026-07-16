@@ -1,5 +1,6 @@
 "use client";
 
+import { BacktestCandlestick } from "@/components/charts/backtest-candlestick";
 import { EquityCurve } from "@/components/charts/equity-curve";
 import { MonthlyHeatmap } from "@/components/charts/monthly-heatmap";
 import { PerfStats } from "@/components/charts/perf-stats";
@@ -73,12 +74,22 @@ interface BacktestResult {
       avg_trade: number;
     };
   };
+  ohlc: Array<{
+    timestamp: string;
+    open: number;
+    high: number;
+    low: number;
+    close: number;
+  }>;
   trades: Array<{
     entry_time: string;
+    exit_time?: string;
     signal: string;
     direction: string;
     entry: number;
     exit: number;
+    sl?: number;
+    tp?: number;
     result: string;
     pips: number;
     profit: number;
@@ -302,6 +313,12 @@ export default function BacktestingPage() {
 
           {/* Performance Stats Cards */}
           <PerfStats metrics={result.metrics} />
+
+          {/* Candlestick Chart with Trade Overlay */}
+          <BacktestCandlestick
+            ohlc={result.ohlc || []}
+            trades={result.trades || []}
+          />
 
           {/* Charts Row */}
           <div className="grid gap-6 lg:grid-cols-2">

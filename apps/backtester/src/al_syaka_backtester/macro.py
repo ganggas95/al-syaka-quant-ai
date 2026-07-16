@@ -426,11 +426,12 @@ def _resolve_final_decision(
 
         # --- Decision resolution ---
         if conflict:
+            # Relaxed: HEDGE → Reduced Confidence (not blocking)
+            # Trade proceeds with lower confidence → smaller position size
+            reduced_conf = round(min(60, (confidence + macro_conf) / 2.0 * 0.5), 1)
             return {
-                "final_decision": "HEDGE",
-                "decision_confidence": round(
-                    min(60, (confidence + macro_conf) / 2.0 * 0.6), 1
-                ),
+                "final_decision": technical_signal,
+                "decision_confidence": reduced_conf,
                 "conflict_detected": True,
             }
 

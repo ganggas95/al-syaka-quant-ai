@@ -30,7 +30,7 @@ async def _fetch_ohlc_data(symbol: str, timeframe: str, days: int):
     return df, start, end
 
 
-def _build_response(engine, metrics, symbol, timeframe, days, initial_balance, risk_percent):
+def _build_response(engine, metrics, symbol, timeframe, days, initial_balance, risk_percent, ohlc_df=None):
     """Build final JSON response from backtest results."""
     monthly_returns = {}
     if metrics.monthly_returns:
@@ -46,7 +46,22 @@ def _build_response(engine, metrics, symbol, timeframe, days, initial_balance, r
             "equity": round(pt["equity"], 2),
         })
 
+    # Downsample OHLC data for candlestick visualization (max 1000 candles)
+    ohlc_data = []
+    if ohlc_df is not None and not ohlc_df.empty:
+        ohlc_step = max(1, len(ohlc_df) // 1000)
+        for i in range(0, len(ohlc_df), ohlc_step):
+            row = ohlc_df.iloc[i]
+            ohlc_data.append({
+                "timestamp": row["timestamp"].isoformat() if hasattr(row["timestamp"], "isoformat") else str(row["timestamp"]),
+                "open": row["open"],
+                "high": row["high"],
+                "low": row["low"],
+                "close": row["close"],
+            })
+
     return {
+        "ohlc": ohlc_data,
         "config": {
             "symbol": symbol,
             "timeframe": timeframe,
@@ -145,7 +160,7 @@ async def _backtest_generator(
                 continue
 
         metrics = await task
-        result = _build_response(engine, metrics, symbol, timeframe, days, initial_balance, risk_percent)
+        result = _build_response(engine, metrics, symbol, timeframe, days, initial_balance, risk_percent, ohlc_df=df)
 
         yield f"data: {json.dumps({'type': 'progress', 'percent': 100})}\n\n"
         yield f"data: {json.dumps({'type': 'complete', 'result': result})}\n\n"
@@ -200,7 +215,7 @@ async def run_backtest(
         engine = BacktestEngine(config)
         metrics = engine.run(df)
 
-        return _build_response(engine, metrics, symbol, timeframe, days, initial_balance, risk_percent)
+        return _build_response(engine, metrics, symbol, timeframe, days, initial_balance, risk_percent, ohlc_df=df)
 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
