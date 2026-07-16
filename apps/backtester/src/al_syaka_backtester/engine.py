@@ -154,17 +154,17 @@ class BacktestConfig:
     session_config: dict = field(default_factory=lambda: {
         "ASIA": {
             "risk_multiplier": 1.0,      # Normal risk
-            "min_confidence": 0.60,      # MR works at 60%+
+            "min_confidence": 0.55,      # Aligned with global min_confidence (was 0.60)
             "require_bos": False,        # BOS not needed for MR
         },
         "LONDON": {
             "risk_multiplier": 0.5,      # Reduced risk (SELL+LONDON = 64% loss)
-            "min_confidence": 0.65,      # Aligned with tf_min_confidence (was 0.72)
+            "min_confidence": 0.55,      # Aligned with global min_confidence (was 0.65)
             "require_bos": False,        # Redundant — regime classifier handles this
         },
         "NEWYORK": {
             "risk_multiplier": 1.0,      # Normal risk
-            "min_confidence": 0.65,      # Aligned with tf_min_confidence (was 0.70)
+            "min_confidence": 0.55,      # Aligned with global min_confidence (was 0.65)
             "require_bos": False,        # BOS not required
         },
     })
@@ -328,7 +328,32 @@ class BacktestEngine:
             if signal.get("confidence", 0) < min_conf:
                 return None
 
-            # Phase 4: Macro Analysis + Final Decision Resolution
+            # ── Session Intelligence Engine (Priority 7) ──
+            # Dijalankan SEBELUM macro engine agar session filter
+            # mengecek technical confidence asli, bukan yang sudah
+            # direduksi macro. Macro reduction hanya untuk position sizing.
+            if self.config.use_session_intelligence:
+                session = get_session_name(current_row["timestamp"])
+                sess_cfg = self.config.session_config.get(session, {})
+                sess_conf = sess_cfg.get("min_confidence", 0)
+                effective_conf = max(min_conf, sess_conf)
+                if signal.get("confidence", 0) < effective_conf:
+                    return None
+                # Session-specific BOS confirmation for SELL signals during LONDON
+                if session == "LONDON" and sess_cfg.get("require_bos", False):
+                    ema12 = indicators.get("ema_12")
+                    ema50 = indicators.get("ema_50")
+                    if ema12 is not None and ema50 is not None and len(ema12) > 1:
+                        has_bos_uptrend = ema12.iloc[-1] > ema50.iloc[-1]
+                        has_bos_downtrend = ema12.iloc[-1] < ema50.iloc[-1]
+                        if signal["signal"] == "SELL" and not has_bos_downtrend:
+                            return None
+                        if signal["signal"] == "BUY" and not has_bos_uptrend:
+                            return None
+
+            # ── Phase 4: Macro Analysis + Final Decision Resolution ──
+            # Macro engine mereduksi confidence untuk position sizing.
+            # Tidak lagi menjadi gatekeep — sinyal sudah lolos session filter.
             macro = None
             if self.config.use_macro_engine and self.macro_engine is not None:
                 macro = self.macro_engine.analyze_at(
@@ -347,13 +372,14 @@ class BacktestEngine:
                         macro_result=macro,
                     )
                     final_dec = decision["final_decision"]
-                    # HEDGE or WAIT → skip trade (conflict too high)
-                    if final_dec in ("WAIT", "HEDGE"):
+                    # WAIT → skip trade (low confidence / neutral signal)
+                    if final_dec == "WAIT":
                         return None
                     # Override: macro overrides weak tech signal
                     if final_dec != signal["signal"]:
                         signal["signal"] = final_dec
                     # Adjust confidence based on decision confidence
+                    # (affects position sizing, not gatekeeping)
                     dec_conf = decision["decision_confidence"] / 100.0
                     if 0 < dec_conf < signal.get("confidence", 0.5):
                         signal["confidence"] = dec_conf
@@ -366,26 +392,6 @@ class BacktestEngine:
                     if regime.value not in allowed:
                         return None
 
-            # Session Intelligence Engine (Priority 7)
-            if self.config.use_session_intelligence:
-                session = get_session_name(current_row["timestamp"])
-                sess_cfg = self.config.session_config.get(session, {})
-                # Session-specific confidence (takes max of strategy & session thresholds)
-                sess_conf = sess_cfg.get("min_confidence", 0)
-                effective_conf = max(min_conf, sess_conf)
-                if signal.get("confidence", 0) < effective_conf:
-                    return None
-                # Session-specific BOS confirmation for SELL signals during LONDON
-                if session == "LONDON" and sess_cfg.get("require_bos", False):
-                    ema12 = indicators.get("ema_12")
-                    ema50 = indicators.get("ema_50")
-                    if ema12 is not None and ema50 is not None and len(ema12) > 1:
-                        has_bos_uptrend = ema12.iloc[-1] > ema50.iloc[-1]
-                        has_bos_downtrend = ema12.iloc[-1] < ema50.iloc[-1]
-                        if signal["signal"] == "SELL" and not has_bos_downtrend:
-                            return None
-                        if signal["signal"] == "BUY" and not has_bos_uptrend:
-                            return None
         return signal
 
     def _signal_trend_following(self, indicators: dict,
