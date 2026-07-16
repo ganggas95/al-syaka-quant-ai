@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import AsyncGenerator, Optional
 
 import pandas as pd
@@ -13,6 +13,27 @@ from fastapi.responses import StreamingResponse
 from src.collectors.manager import DataCollector
 
 router = APIRouter(prefix="/api/v1/backtesting", tags=["backtesting"])
+
+
+def _to_utc_iso(ts) -> str:
+    """Convert a timestamp to UTC ISO 8601 string with Z suffix."""
+    if not hasattr(ts, "isoformat"):
+        return str(ts)
+    tz = getattr(ts, "tz", getattr(ts, "tzinfo", None))
+    if tz is not None:
+        try:
+            ts = ts.tz_convert("UTC")
+        except (AttributeError, TypeError):
+            try:
+                ts = ts.astimezone(timezone.utc)
+            except Exception:
+                pass
+        # Remove timezone info for clean isoformat
+        try:
+            ts = ts.tz_localize(None)
+        except AttributeError:
+            ts = ts.replace(tzinfo=None)
+    return ts.isoformat() + "Z"
 
 
 async def _fetch_ohlc_data(symbol: str, timeframe: str, days: int):
@@ -42,18 +63,20 @@ def _build_response(engine, metrics, symbol, timeframe, days, initial_balance, r
     for i in range(0, curve_len, step):
         pt = engine.equity_curve[i]
         equity_curve.append({
-            "timestamp": pt["timestamp"].isoformat() if hasattr(pt["timestamp"], "isoformat") else str(pt["timestamp"]),
+            "timestamp": _to_utc_iso(pt["timestamp"]),
             "equity": round(pt["equity"], 2),
         })
 
-    # Downsample OHLC data for candlestick visualization (max 1000 candles)
+    # Full-resolution OHLC data (no downsampling — lightweight-charts handles it)
     ohlc_data = []
     if ohlc_df is not None and not ohlc_df.empty:
-        ohlc_step = max(1, len(ohlc_df) // 1000)
-        for i in range(0, len(ohlc_df), ohlc_step):
-            row = ohlc_df.iloc[i]
+        for _, row in ohlc_df.iterrows():
+            ts = row["timestamp"]
+            # Skip rows with invalid timestamps (None, NaT, NaN)
+            if pd.isna(ts):
+                continue
             ohlc_data.append({
-                "timestamp": row["timestamp"].isoformat() if hasattr(row["timestamp"], "isoformat") else str(row["timestamp"]),
+                "timestamp": _to_utc_iso(ts),
                 "open": row["open"],
                 "high": row["high"],
                 "low": row["low"],
@@ -75,7 +98,7 @@ def _build_response(engine, metrics, symbol, timeframe, days, initial_balance, r
             "losing_trades": metrics.losing_trades,
             "win_rate": round(metrics.win_rate * 100, 2),
             "net_profit": round(metrics.net_profit, 2),
-            "profit_factor": round(metrics.profit_factor, 2),
+            "profit_factor": round(metrics.profit_factor, 2) if metrics.profit_factor != float('inf') else None,
             "avg_profit_per_trade": round(metrics.avg_profit_per_trade, 2),
             "avg_win": round(metrics.avg_win, 2),
             "avg_loss": round(metrics.avg_loss, 2),
@@ -97,9 +120,9 @@ def _build_response(engine, metrics, symbol, timeframe, days, initial_balance, r
             "total_registered": len(engine.regime_history),
         },
         "risk_metrics": {
-            "max_daily_loss_hit": engine.daily_pnl <= -engine.config.max_daily_loss if engine.daily_pnl else False,
-            "consecutive_losses": engine.consecutive_losses,
-            "consecutive_loss_triggered": engine.consecutive_losses >= engine.config.max_consecutive_losses,
+            "max_daily_loss_hit": bool(engine.daily_pnl <= -engine.config.max_daily_loss) if engine.daily_pnl else False,
+            "consecutive_losses": int(engine.consecutive_losses),
+            "consecutive_loss_triggered": bool(engine.consecutive_losses >= engine.config.max_consecutive_losses),
         },
         "session_breakdown": _calc_session_breakdown(engine.trades),
         "trade_attribution": _calc_trade_attribution(engine.trades),
@@ -111,20 +134,20 @@ def _build_response(engine, metrics, symbol, timeframe, days, initial_balance, r
         },
         "trades": [
             {
-                "entry_time": t.entry_time.isoformat(),
-                "exit_time": t.exit_time.isoformat() if t.exit_time else None,
+                "entry_time": _to_utc_iso(t.entry_time),
+                "exit_time": _to_utc_iso(t.exit_time) if t.exit_time else None,
                 "signal": t.signal,
                 "direction": t.direction,
-                "entry": t.entry_price,
-                "exit": t.exit_price,
-                "sl": t.stop_loss,
-                "tp": t.take_profit,
+                "entry": float(t.entry_price) if t.entry_price else None,
+                "exit": float(t.exit_price) if t.exit_price else None,
+                "sl": float(t.stop_loss) if t.stop_loss else None,
+                "tp": float(t.take_profit) if t.take_profit else None,
                 "result": t.result,
-                "pips": t.pips,
-                "profit": t.profit,
+                "pips": float(t.pips) if t.pips else 0.0,
+                "profit": float(t.profit) if t.profit else 0.0,
                 "exit_reason": t.exit_reason,
             }
-            for t in engine.trades[-50:]
+            for t in engine.trades
         ],
     }
 
@@ -160,7 +183,7 @@ async def _backtest_generator(
             try:
                 pct = await asyncio.wait_for(queue.get(), timeout=0.3)
                 if pct != last_pct:
-                    yield f"data: {json.dumps({'type': 'progress', 'percent': pct})}\n\n"
+                    yield f"data: {json.dumps({'type': 'progress', 'percent': pct}, default=str)}\n\n"
                     last_pct = pct
             except asyncio.TimeoutError:
                 continue
@@ -169,7 +192,7 @@ async def _backtest_generator(
         result = _build_response(engine, metrics, symbol, timeframe, days, initial_balance, risk_percent, ohlc_df=df)
 
         yield f"data: {json.dumps({'type': 'progress', 'percent': 100})}\n\n"
-        yield f"data: {json.dumps({'type': 'complete', 'result': result})}\n\n"
+        yield f"data: {json.dumps({'type': 'complete', 'result': result}, default=str)}\n\n"
 
     except HTTPException as e:
         yield f"data: {json.dumps({'type': 'error', 'detail': e.detail})}\n\n"

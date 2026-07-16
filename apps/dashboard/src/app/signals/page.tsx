@@ -49,6 +49,7 @@ export default function SignalsPage() {
     isRefreshing,
     error,
     retry,
+    countdown,
   } = useAutoSignal(symbol, timeframe, includeAI);
 
   // ── Loading state (first load) ─────────────────────────────────────────
@@ -102,6 +103,7 @@ export default function SignalsPage() {
         onTimeframeChange={setTimeframe}
         onIncludeAIChange={setIncludeAI}
         isRefreshing={isRefreshing}
+        countdown={countdown}
       />
 
       {/* ── Signal Status Banner ────────────────────────────────────── */}
@@ -251,6 +253,7 @@ interface HeaderControlsProps {
   onTimeframeChange: (t: string) => void;
   onIncludeAIChange: (v: boolean) => void;
   isRefreshing?: boolean;
+  countdown?: number;
 }
 
 function HeaderControls({
@@ -261,6 +264,7 @@ function HeaderControls({
   onTimeframeChange,
   onIncludeAIChange,
   isRefreshing,
+  countdown,
 }: HeaderControlsProps) {
   return (
     <div className="flex flex-col gap-4 border-b border-white/5 pb-6">
@@ -335,12 +339,24 @@ function HeaderControls({
           </label>
         </div>
 
-        {/* Spacer */}
-        <div className="flex flex-1 items-end justify-end gap-2">
-          {/* ExportSignal will be connected when result is available */}
-          <span className="text-[10px] text-muted-foreground">
-            Auto-generating on change...
-          </span>
+        {/* Auto-refresh Status */}
+        <div className="flex flex-1 items-end justify-end gap-3">
+          {countdown != null && (
+            <div className="flex items-center gap-2 rounded-lg border bg-card px-3 py-1.5">
+              <span className="relative flex h-2 w-2">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-400 opacity-75" />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-green-500" />
+              </span>
+              <span className="text-[10px] font-medium text-muted-foreground">
+                Live
+              </span>
+              <span className="text-[10px] font-mono text-muted-foreground/60">
+                {Math.floor(countdown / 60)}:
+                {(countdown % 60).toString().padStart(2, "0")}
+              </span>
+              {isRefreshing && <RefreshIndicator />}
+            </div>
+          )}
         </div>
       </div>
     </div>

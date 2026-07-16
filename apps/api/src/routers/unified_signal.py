@@ -93,6 +93,9 @@ async def get_unified_signal(
             "reasons": result.reasons,
             "indicators_used": result.indicators_used,
             "quant_strategy": result.quant_strategy,
+            "h1_signal": result.h1_signal,
+            "h4_signal": result.h4_signal,
+            "d1_signal": result.d1_signal,
             "market_structure": {
                 "trend": result.market_trend,
                 "swing_highs": result.swing_highs,

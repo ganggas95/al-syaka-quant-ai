@@ -6,10 +6,13 @@ import { MonthlyHeatmap } from "@/components/charts/monthly-heatmap";
 import { PerfStats } from "@/components/charts/perf-stats";
 import { SessionBreakdown } from "@/components/charts/session-breakdown";
 import { SignalBreakdown } from "@/components/charts/signal-breakdown";
+import { TradeDensityHeatmap } from "@/components/charts/trade-density-heatmap";
 import { BacktestProgress } from "@/components/shared/backtest-progress";
 import {
     AlertTriangle,
     CheckCircle2,
+    ChevronLeft,
+    ChevronRight,
     Play,
     RotateCcw,
     XCircle,
@@ -17,6 +20,7 @@ import {
 import { useRef, useState } from "react";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const TRADE_PAGE_SIZE = 15;
 
 interface BacktestResult {
   config: {
@@ -114,6 +118,10 @@ export default function BacktestingPage() {
   const [progress, setProgress] = useState(0);
   const [result, setResult] = useState<BacktestResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [tradePage, setTradePage] = useState(0);
+  const [tabMode, setTabMode] = useState<"candlestick" | "table">(
+    "candlestick",
+  );
   const abortRef = useRef<AbortController | null>(null);
 
   const runBacktest = async () => {
@@ -166,6 +174,7 @@ export default function BacktestingPage() {
               setProgress(data.percent);
             } else if (data.type === "complete") {
               setResult(data.result);
+              setTradePage(0);
               setProgress(100);
             } else if (data.type === "error") {
               setError(data.detail);
@@ -321,11 +330,173 @@ export default function BacktestingPage() {
           {/* Performance Stats Cards */}
           <PerfStats metrics={result.metrics} />
 
-          {/* Candlestick Chart with Trade Overlay */}
-          <BacktestCandlestick
-            ohlc={result.ohlc || []}
-            trades={result.trades || []}
-          />
+          {/* ── Tab: Candle Stick / Table ────────────────────────────── */}
+          <div className="rounded-lg border bg-card">
+            {/* Tab bar */}
+            <div className="flex border-b">
+              <button
+                onClick={() => setTabMode("candlestick")}
+                className={`relative px-5 py-2.5 text-xs font-medium transition-colors ${
+                  tabMode === "candlestick"
+                    ? "text-foreground"
+                    : "text-muted-foreground hover:text-foreground/80"
+                }`}
+              >
+                Candle Stick
+                {tabMode === "candlestick" && (
+                  <span className="absolute inset-x-2 bottom-0 h-0.5 rounded-full bg-primary" />
+                )}
+              </button>
+              <button
+                onClick={() => setTabMode("table")}
+                className={`relative px-5 py-2.5 text-xs font-medium transition-colors ${
+                  tabMode === "table"
+                    ? "text-foreground"
+                    : "text-muted-foreground hover:text-foreground/80"
+                }`}
+              >
+                Table
+                {tabMode === "table" && (
+                  <span className="absolute inset-x-2 bottom-0 h-0.5 rounded-full bg-primary" />
+                )}
+              </button>
+            </div>
+
+            {/* Tab content */}
+            {tabMode === "candlestick" ? (
+              <BacktestCandlestick
+                ohlc={result.ohlc || []}
+                trades={result.trades || []}
+              />
+            ) : (
+              (() => {
+                const allTrades = result.trades;
+                const totalPages = Math.max(
+                  1,
+                  Math.ceil(allTrades.length / TRADE_PAGE_SIZE),
+                );
+                const safePage = Math.min(tradePage, totalPages - 1);
+                const pageTrades = allTrades.slice(
+                  safePage * TRADE_PAGE_SIZE,
+                  (safePage + 1) * TRADE_PAGE_SIZE,
+                );
+                const from = safePage * TRADE_PAGE_SIZE + 1;
+                const to = Math.min(
+                  (safePage + 1) * TRADE_PAGE_SIZE,
+                  allTrades.length,
+                );
+
+                return (
+                  <>
+                    {/* Pagination header */}
+                    <div className="flex items-center justify-between border-b px-4 py-3">
+                      <div>
+                        <h3 className="text-sm font-medium">Recent Trades</h3>
+                        <p className="text-xs text-muted-foreground">
+                          Showing {from}–{to} of {allTrades.length} trades
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          onClick={() =>
+                            setTradePage((p) => Math.max(0, p - 1))
+                          }
+                          disabled={safePage === 0}
+                          className="rounded-md border bg-secondary/40 p-1.5 text-muted-foreground transition-colors hover:bg-secondary/60 disabled:cursor-not-allowed disabled:opacity-30"
+                        >
+                          <ChevronLeft className="h-3.5 w-3.5" />
+                        </button>
+                        <span className="px-2 text-[10px] font-medium text-muted-foreground">
+                          {safePage + 1} / {totalPages}
+                        </span>
+                        <button
+                          onClick={() =>
+                            setTradePage((p) => Math.min(totalPages - 1, p + 1))
+                          }
+                          disabled={safePage >= totalPages - 1}
+                          className="rounded-md border bg-secondary/40 p-1.5 text-muted-foreground transition-colors hover:bg-secondary/60 disabled:cursor-not-allowed disabled:opacity-30"
+                        >
+                          <ChevronRight className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Table */}
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b text-muted-foreground">
+                            <th className="px-4 py-2 text-left">#</th>
+                            <th className="px-4 py-2 text-left">Time</th>
+                            <th className="px-4 py-2 text-left">Signal</th>
+                            <th className="px-4 py-2 text-right">Entry</th>
+                            <th className="px-4 py-2 text-right">Exit</th>
+                            <th className="px-4 py-2 text-right">Pips</th>
+                            <th className="px-4 py-2 text-right">Profit</th>
+                            <th className="px-4 py-2 text-center">Result</th>
+                            <th className="px-4 py-2 text-left">Exit Reason</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {pageTrades.map((t, i) => {
+                            const idx = safePage * TRADE_PAGE_SIZE + i + 1;
+                            return (
+                              <tr
+                                key={idx}
+                                className="border-b last:border-0 hover:bg-secondary/30"
+                              >
+                                <td className="px-4 py-2 text-[10px] text-muted-foreground">
+                                  {idx}
+                                </td>
+                                <td className="px-4 py-2 text-muted-foreground">
+                                  {new Date(t.entry_time).toLocaleDateString()}
+                                </td>
+                                <td className="px-4 py-2">
+                                  <span
+                                    className={`font-medium ${t.signal === "BUY" ? "text-green-500" : "text-red-500"}`}
+                                  >
+                                    {t.signal}
+                                  </span>
+                                </td>
+                                <td className="px-4 py-2 text-right font-mono">
+                                  {t.entry.toFixed(5)}
+                                </td>
+                                <td className="px-4 py-2 text-right font-mono">
+                                  {t.exit?.toFixed(5) || "-"}
+                                </td>
+                                <td
+                                  className={`px-4 py-2 text-right font-mono ${t.pips > 0 ? "text-green-500" : "text-red-500"}`}
+                                >
+                                  {t.pips > 0 ? "+" : ""}
+                                  {t.pips}
+                                </td>
+                                <td
+                                  className={`px-4 py-2 text-right font-mono ${t.profit > 0 ? "text-green-500" : "text-red-500"}`}
+                                >
+                                  {t.profit > 0 ? "+" : ""}$
+                                  {t.profit.toFixed(2)}
+                                </td>
+                                <td className="px-4 py-2 text-center">
+                                  {t.result === "WIN" ? (
+                                    <CheckCircle2 className="mx-auto h-4 w-4 text-green-500" />
+                                  ) : (
+                                    <XCircle className="mx-auto h-4 w-4 text-red-500" />
+                                  )}
+                                </td>
+                                <td className="px-4 py-2 text-muted-foreground">
+                                  {t.exit_reason}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                );
+              })()
+            )}
+          </div>
 
           {/* Charts Row */}
           <div className="grid gap-6 lg:grid-cols-2">
@@ -336,6 +507,9 @@ export default function BacktestingPage() {
             <MonthlyHeatmap data={result.monthly_returns} />
           </div>
 
+          {/* Trade Density Heatmap (Phase 7) */}
+          <TradeDensityHeatmap trades={result.trades || []} />
+
           {/* Session Breakdown */}
           {result.session_breakdown && (
             <SessionBreakdown data={result.session_breakdown} />
@@ -345,79 +519,6 @@ export default function BacktestingPage() {
           {result.signal_breakdown && (
             <SignalBreakdown data={result.signal_breakdown} />
           )}
-
-          {/* Trades Table */}
-          <div className="rounded-lg border bg-card">
-            <div className="border-b px-4 py-3">
-              <h3 className="text-sm font-medium">Recent Trades</h3>
-              <p className="text-xs text-muted-foreground">
-                Showing last {result.trades.length} of{" "}
-                {result.metrics.total_trades} trades
-              </p>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b text-muted-foreground">
-                    <th className="px-4 py-2 text-left">Time</th>
-                    <th className="px-4 py-2 text-left">Signal</th>
-                    <th className="px-4 py-2 text-right">Entry</th>
-                    <th className="px-4 py-2 text-right">Exit</th>
-                    <th className="px-4 py-2 text-right">Pips</th>
-                    <th className="px-4 py-2 text-right">Profit</th>
-                    <th className="px-4 py-2 text-center">Result</th>
-                    <th className="px-4 py-2 text-left">Exit Reason</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {result.trades.map((t, i) => (
-                    <tr
-                      key={i}
-                      className="border-b last:border-0 hover:bg-secondary/30"
-                    >
-                      <td className="px-4 py-2 text-muted-foreground">
-                        {new Date(t.entry_time).toLocaleDateString()}
-                      </td>
-                      <td className="px-4 py-2">
-                        <span
-                          className={`font-medium ${t.signal === "BUY" ? "text-green-500" : "text-red-500"}`}
-                        >
-                          {t.signal}
-                        </span>
-                      </td>
-                      <td className="px-4 py-2 text-right font-mono">
-                        {t.entry.toFixed(5)}
-                      </td>
-                      <td className="px-4 py-2 text-right font-mono">
-                        {t.exit?.toFixed(5) || "-"}
-                      </td>
-                      <td
-                        className={`px-4 py-2 text-right font-mono ${t.pips > 0 ? "text-green-500" : "text-red-500"}`}
-                      >
-                        {t.pips > 0 ? "+" : ""}
-                        {t.pips}
-                      </td>
-                      <td
-                        className={`px-4 py-2 text-right font-mono ${t.profit > 0 ? "text-green-500" : "text-red-500"}`}
-                      >
-                        {t.profit > 0 ? "+" : ""}${t.profit.toFixed(2)}
-                      </td>
-                      <td className="px-4 py-2 text-center">
-                        {t.result === "WIN" ? (
-                          <CheckCircle2 className="mx-auto h-4 w-4 text-green-500" />
-                        ) : (
-                          <XCircle className="mx-auto h-4 w-4 text-red-500" />
-                        )}
-                      </td>
-                      <td className="px-4 py-2 text-muted-foreground">
-                        {t.exit_reason}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
         </>
       )}
     </div>

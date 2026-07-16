@@ -244,6 +244,7 @@ class BacktestEngine:
                 self.current_day = day_key
             elif day_key != self.current_day:
                 self.daily_pnl = 0.0
+                self.consecutive_losses = 0  # Reset daily to prevent permanent lockout
                 self.current_day = day_key
 
             # Weekly P&L reset

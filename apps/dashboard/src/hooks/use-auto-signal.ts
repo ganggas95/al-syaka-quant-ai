@@ -1,12 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
 import { api, Candle, SignalHistoryEntry, UnifiedSignalResponse } from "@/lib/api";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
 const DEBOUNCE_MS = 300;
 const MAX_HISTORY = 20;
+const AUTO_REFRESH_MS = 300_000; // 5 minutes
 
 // ─── Hook Return Type ───────────────────────────────────────────────────────
 
@@ -25,6 +26,8 @@ export interface UseAutoSignalReturn {
   error: string | null;
   /** Manually retry fetching */
   retry: () => void;
+  /** Seconds remaining until next auto-refresh */
+  countdown: number;
 }
 
 // ─── Hook ───────────────────────────────────────────────────────────────────
@@ -41,6 +44,8 @@ export function useAutoSignal(
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [countdown, setCountdown] = useState(AUTO_REFRESH_MS / 1000);
+
   // Refs for performance & cancellation
   const abortRef = useRef<AbortController | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -48,6 +53,8 @@ export function useAutoSignal(
   const hasLoadedRef = useRef(false);
   const cachedResultRef = useRef<UnifiedSignalResponse | null>(null);
   const cachedCandleRef = useRef<Candle[]>([]);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const isTabVisibleRef = useRef(true);
 
   // ── Fetch signal ───────────────────────────────────────────────────────
 
@@ -81,6 +88,9 @@ export function useAutoSignal(
         hasLoadedRef.current = true;
 
         setResult(signalResult);
+
+        // Reset countdown after successful fetch
+        setCountdown(AUTO_REFRESH_MS / 1000);
 
         // Update history
         setSignalHistory((prev) => {
@@ -139,12 +149,49 @@ export function useAutoSignal(
     };
   }, [symbol, timeframe, includeAI, fetchData]);
 
+  // ── Auto-refresh interval ──────────────────────────────────────────────
+  // Polls every second for countdown, triggers fetch when countdown hits 0.
+  // Pauses when browser tab is not visible.
+
+  useEffect(() => {
+    // Clear any previous interval
+    if (intervalRef.current) clearInterval(intervalRef.current);
+
+    intervalRef.current = setInterval(() => {
+      if (!isTabVisibleRef.current) return; // pause when tab hidden
+
+      setCountdown((prev) => {
+        if (prev <= 1) {
+          // Time to refresh — trigger fetch asynchronously
+          fetchData(symbol, timeframe, includeAI);
+          return AUTO_REFRESH_MS / 1000; // reset
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
+  }, [symbol, timeframe, includeAI, fetchData]);
+
+  // ── Page Visibility API: pause/resume auto-refresh ─────────────────────
+
+  useEffect(() => {
+    const handleVisibility = () => {
+      isTabVisibleRef.current = !document.hidden;
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
+  }, []);
+
   // ── Cleanup on unmount ─────────────────────────────────────────────────
 
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
       if (debounceRef.current) clearTimeout(debounceRef.current);
+      if (intervalRef.current) clearInterval(intervalRef.current);
     };
   }, []);
 
@@ -162,5 +209,6 @@ export function useAutoSignal(
     isRefreshing,
     error,
     retry,
+    countdown,
   };
 }
