@@ -217,6 +217,8 @@ def _generate_summary(metrics) -> str:
         parts.append(f"📈 Profit Factor: {metrics.profit_factor:.2f}")
     parts.append(f"📉 Max Drawdown: {metrics.max_drawdown_percent:.1f}%")
     parts.append(f"⚡ Sharpe: {metrics.sharpe_ratio:.2f}")
+    parts.append(f"🔄 Recovery: {metrics.recovery_factor:.2f}")
+    parts.append(f"🎯 Expectancy: ${metrics.expectancy:.2f}")
     parts.append(f"🏆 Best Trade: ${metrics.best_trade:.2f}")
     parts.append(f"💀 Worst Trade: ${metrics.worst_trade:.2f}")
     return " | ".join(parts)

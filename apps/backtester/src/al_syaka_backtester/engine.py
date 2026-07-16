@@ -86,27 +86,50 @@ class BacktestConfig:
         "HIGH_VOLATILITY": 1.0,# RR 1:1.0
     })
 
-    # Exit Optimization (Priority 2 — Iteration 005)
-    # DISABLED by default: breakeven/partial TP hurt PF with tight SL/TP (RR 1:1)
+    # Exit Optimization (Priority 2 — Iteration 008)
     use_breakeven: bool = False
     breakeven_atr: float = 0.5      # Move SL to entry at 0.5x ATR profit
+
+    # Regime-Adaptive Partial TP (Iteration 008)
+    # Different ratio/ATR per regime: trending=keep most, sideways=capture early, vol=early
     use_partial_tp: bool = False
-    partial_tp_ratio: float = 0.5   # Close 50% at partial level
-    partial_tp_atr: float = 0.7     # Partial TP at 0.7x ATR profit
-    use_trailing: bool = False      # Disabled — hurts with tight SL/TP
-    trail_activation_rr: float = 0.8
-    trail_distance_atr: float = 0.5
+    partial_tp_ratio_trending: float = 0.3    # 30% close, 70% remains for trailing
+    partial_tp_atr_trending: float = 1.0      # at 1.0 ATR (trends run further)
+    partial_tp_ratio_sideways: float = 0.5    # 50% close (MR profit limited)
+    partial_tp_atr_sideways: float = 0.7      # at 0.7 ATR
+    partial_tp_ratio_volatile: float = 0.4    # 40% close (vol can reverse)
+    partial_tp_atr_volatile: float = 0.6      # at 0.6 ATR (earlier in high vol)
+
+    # Trailing Stop — Adaptive (Iteration 007)
+    use_trailing: bool = True
+    trail_activation_atr: float = 1.5
+    trail_distance_atr: float = 0.8
+    trail_mode: str = "chandelier"
 
     # Risk Management (Phase 9)
-    use_partial_close: bool = False
-    partial_close_atr: float = 1.5      # Close 50% at 1.5x ATR profit
-    partial_close_ratio: float = 0.5    # 50% of position
     max_daily_loss: float = 500.0       # Stop trading if daily loss > $500
     max_consecutive_losses: int = 5     # Stop after 5 consecutive losses
-    # Weekly loss limit — stop trading if weekly loss exceeds threshold
-    use_weekly_loss_limit: bool = False  # Disabled by default (opt-in)
-    max_weekly_loss: float = 1500.0     # Stop trading if weekly loss > $1500
+    use_weekly_loss_limit: bool = False
+    max_weekly_loss: float = 1500.0
     use_dynamic_sizing: bool = True     # Scale size based on ATR volatility
+
+    # Equity Curve Smoothing (Iteration 008)
+    # Soft position sizing adjustment based on recent performance.
+    # Reduces size after losses (keeps you in the game), increases cautiously after wins.
+    use_equity_smoothing: bool = True
+    equity_smooth_window: int = 10      # Look back N trades for performance
+    equity_loss_streak_mult: dict = field(default_factory=lambda: {
+        0: 1.0,     # 0 consecutive losses: full size
+        1: 1.0,     # 1 loss: full size
+        2: 0.85,    # 2 losses: 85% size
+        3: 0.70,    # 3 losses: 70% size
+        4: 0.55,    # 4 losses: 55% size
+    })                                  # 5+ : hit max_consecutive_losses hard stop
+    equity_win_streak_mult: dict = field(default_factory=lambda: {
+        0: 1.0,     # 0 consecutive wins: full size
+        3: 1.05,    # 3+ wins: 105% size
+        5: 1.10,    # 5+ wins: 110% size
+    })
 
     # Confidence-based Position Sizing (Priority 5 — Iteration 005)
     # Maps confidence thresholds to risk multipliers
@@ -529,6 +552,37 @@ class BacktestEngine:
             session = get_session_name(row["timestamp"])
             sess_cfg = self.config.session_config.get(session, {})
             risk_amount *= sess_cfg.get("risk_multiplier", 1.0)
+
+        # Equity Curve Smoothing (Iteration 008)
+        # Soft sizing adjustment based on recent consecutive performance.
+        if self.config.use_equity_smoothing:
+            eq_mult = 1.0
+            # Count consecutive losses from most recent trades (skip PENDING)
+            closed = [t for t in self.trades if t.result in ("WIN", "LOSS")]
+            cons_losses = 0
+            cons_wins = 0
+            for t in reversed(closed):
+                if t.result == "LOSS":
+                    cons_losses += 1
+                    cons_wins = 0
+                else:
+                    cons_wins += 1
+                    cons_losses = 0
+                if len(closed) - closed.index(t) > self.config.equity_smooth_window:
+                    break
+            # Look up multiplier from streak tables
+            loss_keys = sorted(self.config.equity_loss_streak_mult.keys(), reverse=True)
+            for k in loss_keys:
+                if cons_losses >= k:
+                    eq_mult = self.config.equity_loss_streak_mult[k]
+                    break
+            win_keys = sorted(self.config.equity_win_streak_mult.keys(), reverse=True)
+            for k in win_keys:
+                if cons_wins >= k:
+                    eq_mult = max(eq_mult, self.config.equity_win_streak_mult[k])
+                    break
+            risk_amount *= eq_mult
+
         sl_distance = abs(entry - sl)
         # Correct lot size formula: risk / (SL distance × contract_size)
         sym_info = get_symbol_info(self.config.symbol)
@@ -603,32 +657,66 @@ class BacktestEngine:
                     if t.stop_loss > entry: t.stop_loss = entry
                 t.exit_reason = "BREAKEVEN"
 
-            # Partial Take Profit: close 50% at partial_tp_atr ATR (Priority 2)
-            if (self.config.use_partial_tp and not t.partial_closed
-                    and profit_atr >= self.config.partial_tp_atr):
-                partial_profit = t.profit * self.config.partial_tp_ratio
-                self.daily_pnl += partial_profit
-                t.lot_size = round(t.lot_size * (1 - self.config.partial_tp_ratio), 2)
-                t.partial_closed = True
-                t.exit_reason = "PARTIAL_TP"
-                # Move SL to entry + small buffer for remaining position
-                if direction == "LONG":
-                    t.stop_loss = max(t.stop_loss or 0, entry + current_atr * 0.1)
-                else:
-                    t.stop_loss = min(t.stop_loss or float('inf'), entry - current_atr * 0.1)
+            # Regime-Adaptive Partial TP (Iteration 008)
+            # Uses regime-specific ratio and ATR target.
+            if self.config.use_partial_tp and not t.partial_closed:
+                # Select regime-appropriate params
+                regime = t.regime
+                if regime == "TRENDING":
+                    p_ratio = self.config.partial_tp_ratio_trending
+                    p_atr = self.config.partial_tp_atr_trending
+                elif regime == "SIDEWAYS":
+                    p_ratio = self.config.partial_tp_ratio_sideways
+                    p_atr = self.config.partial_tp_atr_sideways
+                else:  # HIGH_VOLATILITY, NEWS_DAY, UNKNOWN
+                    p_ratio = self.config.partial_tp_ratio_volatile
+                    p_atr = self.config.partial_tp_atr_volatile
 
-            # Trailing stop: activate at 80% of TP distance (Priority 2)
-            if (self.config.use_trailing and t.partial_closed
-                    and profit_atr >= tp_distance * self.config.trail_activation_rr):
-                trail_level = current_atr * self.config.trail_distance_atr
-                if direction == "LONG":
-                    new_sl = price - trail_level
-                    if t.stop_loss is None or new_sl > t.stop_loss:
-                        t.stop_loss = new_sl; t.exit_reason = "TRAILING"
-                else:
-                    new_sl = price + trail_level
-                    if t.stop_loss is None or new_sl < t.stop_loss:
-                        t.stop_loss = new_sl; t.exit_reason = "TRAILING"
+                if profit_atr >= p_atr:
+                    partial_profit = t.profit * p_ratio
+                    self.daily_pnl += partial_profit
+                    t.lot_size = round(t.lot_size * (1 - p_ratio), 2)
+                    t.partial_closed = True
+                    t.exit_reason = "PARTIAL_TP"
+                    # Move SL to entry + small buffer for remaining position
+                    if direction == "LONG":
+                        t.stop_loss = max(t.stop_loss or 0, entry + current_atr * 0.1)
+                    else:
+                        t.stop_loss = min(t.stop_loss or float('inf'), entry - current_atr * 0.1)
+
+            # ── Trailing Stop — Adaptive (Iteration 007) ──────────────
+            # Independent of partial close. Activates at ATR distance from entry,
+            # then trails stop loss behind price. Two modes:
+            #   "fixed"      — trail distance = ATR * trail_distance_atr
+            #   "chandelier" — trail from peak price (highest high / lowest low)
+            if self.config.use_trailing:
+                # 1. Activate trailing when price moves far enough in our favor
+                if not t.trailing_active and profit_atr >= self.config.trail_activation_atr:
+                    t.trailing_active = True
+                    # Initialize peak at current price
+                    t.peak_price = price
+
+                # 2. Update peak/valley and trail stop
+                if t.trailing_active:
+                    if direction == "LONG":
+                        t.peak_price = max(t.peak_price, high)
+                        if self.config.trail_mode == "chandelier":
+                            new_sl = t.peak_price - (current_atr * self.config.trail_distance_atr)
+                        else:
+                            new_sl = price - (current_atr * self.config.trail_distance_atr)
+                        if t.stop_loss is None or new_sl > t.stop_loss:
+                            t.stop_loss = new_sl
+                            t.exit_reason = "TRAILING"
+                    else:
+                        # SHORT: update valley
+                        t.peak_price = min(t.peak_price, low) if t.peak_price != 0 else low
+                        if self.config.trail_mode == "chandelier":
+                            new_sl = t.peak_price + (current_atr * self.config.trail_distance_atr)
+                        else:
+                            new_sl = price + (current_atr * self.config.trail_distance_atr)
+                        if t.stop_loss is None or new_sl < t.stop_loss:
+                            t.stop_loss = new_sl
+                            t.exit_reason = "TRAILING"
 
             # Check SL/TP
             if direction == "LONG":
