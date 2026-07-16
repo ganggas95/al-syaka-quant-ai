@@ -103,6 +103,12 @@ def _build_response(engine, metrics, symbol, timeframe, days, initial_balance, r
         },
         "session_breakdown": _calc_session_breakdown(engine.trades),
         "trade_attribution": _calc_trade_attribution(engine.trades),
+        "signal_breakdown": {
+            "total_signal_checks": engine.total_signal_checks,
+            "total_signals_taken": len([t for t in engine.trades if t.result != "PENDING"]),
+            "breakdown": engine._compute_signal_breakdown(),
+            "raw_counts": dict(sorted(engine.signal_rejections.items(), key=lambda x: -x[1])),
+        },
         "trades": [
             {
                 "entry_time": t.entry_time.isoformat(),

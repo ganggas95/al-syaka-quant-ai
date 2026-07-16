@@ -204,6 +204,10 @@ class BacktestEngine:
         self.consecutive_losses: int = 0
         self._consecutive_loss_triggered: bool = False
 
+        # Signal rejection tracking (for signal loss breakdown analysis)
+        self.signal_rejections: dict[str, int] = {}  # reason_code → count
+        self.total_signal_checks: int = 0  # total bars where signal was checked (no open pos)
+
     def run(self, ohlc_data: pd.DataFrame,
             progress_callback: Optional[Callable[[int, int], None]] = None) -> BacktestMetrics:
         """Run backtest on historical OHLC data."""
@@ -256,13 +260,16 @@ class BacktestEngine:
             self._update_open_trades(open_trades, df.iloc[i], ind)
             self.balance = self._calculate_balance(open_trades)
 
-            # Detect regime (once per session, at signal check time)
+            # Signal check — only when no open position
             if len(open_trades) == 0:
+                self.total_signal_checks += 1
                 signal = self._check_adaptive_signal(ind, df.iloc[i])
                 if signal:
                     trade = self._open_trade(signal, df.iloc[i], ind)
                     open_trades.append(trade)
                     self.trades.append(trade)
+            else:
+                self._record_rejection("POSITION_OPEN", df.iloc[i]["timestamp"])
 
             equity = self.balance + sum(t.profit for t in open_trades)
             self.equity_curve.append({"timestamp": df.iloc[i]["timestamp"], "equity": equity})
@@ -277,6 +284,63 @@ class BacktestEngine:
 
         return MetricsCalculator.calculate(self.trades, self.equity_curve)
 
+    # ── Signal Rejection Tracking ──────────────────────────────────────
+
+    def _record_rejection(self, reason: str, timestamp, regime="", session=""):
+        """Record why a signal was rejected / no trade was taken."""
+        self.signal_rejections[reason] = self.signal_rejections.get(reason, 0) + 1
+
+    def _compute_signal_breakdown(self) -> dict:
+        """Compute signal loss breakdown as percentages by category.
+        
+        Categories match the Signal Loss Breakdown report format:
+          - Sideways Market  — regime is SIDEWAYS but no MR signal triggered
+          - Low Confidence   — signal exists but below confidence threshold
+          - Asia Session     — signal filtered by Asia session confidence
+          - News Hour        — news day regime (WAIT)
+          - Others           — everything else
+        """
+        REASON_TO_CATEGORY = {
+            "POSITION_OPEN":       "Others",
+            "DAILY_LOSS":          "Others",
+            "WEEKLY_LOSS":         "Others",
+            "MAX_LOSSES":          "Others",
+            "SIDEWAYS_NO_SIGNAL":  "Sideways Market",
+            "TRENDING_NO_SIGNAL":  "Sideways Market",
+            "HIGH_VOL_NO_SIGNAL":  "Others",
+            "NEWS_DAY":            "News Hour",
+            "LOW_CONFIDENCE":      "Low Confidence",
+            "BOS_FILTER":          "Others",
+            "MACRO_WAIT":          "Low Confidence",
+            "REGIME_SESSION":      "Others",
+        }
+        total = sum(self.signal_rejections.values())
+        if total == 0:
+            return {}
+
+        category_totals: dict[str, int] = {}
+        for reason, count in self.signal_rejections.items():
+            cat = REASON_TO_CATEGORY.get(reason, "Others")
+            category_totals[cat] = category_totals.get(cat, 0) + count
+
+        breakdown = {}
+        other_pct = 0.0
+        for cat, count in category_totals.items():
+            pct = round(count / total * 100, 1)
+            if cat != "Others":
+                breakdown[cat] = {"count": count, "percentage": pct}
+            else:
+                other_pct = pct
+
+        # "Others" selalu ditempatkan di akhir
+        if "Others" in category_totals:
+            breakdown["Others"] = {
+                "count": category_totals["Others"],
+                "percentage": other_pct,
+            }
+
+        return breakdown
+
     def _detect_regime(self, indicators: dict, timestamp: datetime) -> MarketRegime:
         """Detect market regime using classifier."""
         if self.classifier:
@@ -287,22 +351,27 @@ class BacktestEngine:
     def _check_adaptive_signal(self, indicators: dict,
                                 current_row: pd.Series) -> Optional[dict]:
         """Adaptive signal checking — pilih strategi berdasarkan regime."""
+        ts = current_row["timestamp"]
+
         # Risk guard: max daily loss
         if self.daily_pnl <= -self.config.max_daily_loss:
+            self._record_rejection("DAILY_LOSS", ts)
             return None
         # Risk guard: max weekly loss
         if (self.config.use_weekly_loss_limit
                 and self.weekly_pnl <= -self.config.max_weekly_loss):
+            self._record_rejection("WEEKLY_LOSS", ts)
             return None
         # Risk guard: max consecutive losses
         if self.consecutive_losses >= self.config.max_consecutive_losses:
+            self._record_rejection("MAX_LOSSES", ts)
             return None
 
-        regime = self._detect_regime(indicators, current_row["timestamp"])
+        regime = self._detect_regime(indicators, ts)
 
         # Track regime for analysis
         self.regime_history.append({
-            "timestamp": current_row["timestamp"],
+            "timestamp": ts,
             "regime": regime.value,
             "close": current_row["close"],
         })
@@ -319,78 +388,92 @@ class BacktestEngine:
             MarketRegime.SIDEWAYS: self.config.mr_min_confidence,
             MarketRegime.HIGH_VOLATILITY: self.config.bo_min_confidence,
         }
+        no_signal_reasons = {
+            MarketRegime.TRENDING: "TRENDING_NO_SIGNAL",
+            MarketRegime.SIDEWAYS: "SIDEWAYS_NO_SIGNAL",
+            MarketRegime.HIGH_VOLATILITY: "HIGH_VOL_NO_SIGNAL",
+            MarketRegime.NEWS_DAY: "NEWS_DAY",
+        }
         checker = strategy_map.get(regime, lambda i, r: None)
         signal = checker(indicators, current_row)
-        if signal:
-            signal["regime"] = regime.value
-            # Apply per-strategy confidence filter (Priority 4)
-            min_conf = strategy_conf_map.get(regime, self.config.min_confidence)
-            if signal.get("confidence", 0) < min_conf:
+        if not signal:
+            reason = no_signal_reasons.get(regime, "NO_SIGNAL")
+            self._record_rejection(reason, ts, regime.value)
+            return None
+
+        signal["regime"] = regime.value
+
+        # Apply per-strategy confidence filter (Priority 4)
+        min_conf = strategy_conf_map.get(regime, self.config.min_confidence)
+        if signal.get("confidence", 0) < min_conf:
+            self._record_rejection("LOW_CONFIDENCE", ts, regime.value)
+            return None
+
+        # ── Session Intelligence Engine (Priority 7) ──
+        # Dijalankan SEBELUM macro engine agar session filter
+        # mengecek technical confidence asli, bukan yang sudah
+        # direduksi macro. Macro reduction hanya untuk position sizing.
+        if self.config.use_session_intelligence:
+            session = get_session_name(ts)
+            sess_cfg = self.config.session_config.get(session, {})
+            sess_conf = sess_cfg.get("min_confidence", 0)
+            effective_conf = max(min_conf, sess_conf)
+            if signal.get("confidence", 0) < effective_conf:
+                self._record_rejection("LOW_CONFIDENCE", ts, regime.value, session)
                 return None
+            # Session-specific BOS confirmation for SELL signals during LONDON
+            if session == "LONDON" and sess_cfg.get("require_bos", False):
+                ema12 = indicators.get("ema_12")
+                ema50 = indicators.get("ema_50")
+                if ema12 is not None and ema50 is not None and len(ema12) > 1:
+                    has_bos_uptrend = ema12.iloc[-1] > ema50.iloc[-1]
+                    has_bos_downtrend = ema12.iloc[-1] < ema50.iloc[-1]
+                    if signal["signal"] == "SELL" and not has_bos_downtrend:
+                        self._record_rejection("BOS_FILTER", ts, regime.value, session)
+                        return None
+                    if signal["signal"] == "BUY" and not has_bos_uptrend:
+                        self._record_rejection("BOS_FILTER", ts, regime.value, session)
+                        return None
 
-            # ── Session Intelligence Engine (Priority 7) ──
-            # Dijalankan SEBELUM macro engine agar session filter
-            # mengecek technical confidence asli, bukan yang sudah
-            # direduksi macro. Macro reduction hanya untuk position sizing.
-            if self.config.use_session_intelligence:
-                session = get_session_name(current_row["timestamp"])
-                sess_cfg = self.config.session_config.get(session, {})
-                sess_conf = sess_cfg.get("min_confidence", 0)
-                effective_conf = max(min_conf, sess_conf)
-                if signal.get("confidence", 0) < effective_conf:
-                    return None
-                # Session-specific BOS confirmation for SELL signals during LONDON
-                if session == "LONDON" and sess_cfg.get("require_bos", False):
-                    ema12 = indicators.get("ema_12")
-                    ema50 = indicators.get("ema_50")
-                    if ema12 is not None and ema50 is not None and len(ema12) > 1:
-                        has_bos_uptrend = ema12.iloc[-1] > ema50.iloc[-1]
-                        has_bos_downtrend = ema12.iloc[-1] < ema50.iloc[-1]
-                        if signal["signal"] == "SELL" and not has_bos_downtrend:
-                            return None
-                        if signal["signal"] == "BUY" and not has_bos_uptrend:
-                            return None
+        # ── Phase 4: Macro Analysis + Final Decision Resolution ──
+        # Macro engine mereduksi confidence untuk position sizing.
+        # Tidak lagi menjadi gatekeep — sinyal sudah lolos session filter.
+        macro = None
+        if self.config.use_macro_engine and self.macro_engine is not None:
+            macro = self.macro_engine.analyze_at(
+                ts,
+                symbol=self.config.symbol,
+            )
+            signal["macro_bias"] = macro.get("macro_bias", "NEUTRAL")
 
-            # ── Phase 4: Macro Analysis + Final Decision Resolution ──
-            # Macro engine mereduksi confidence untuk position sizing.
-            # Tidak lagi menjadi gatekeep — sinyal sudah lolos session filter.
-            macro = None
-            if self.config.use_macro_engine and self.macro_engine is not None:
-                macro = self.macro_engine.analyze_at(
-                    current_row["timestamp"],
-                    symbol=self.config.symbol,
+            if self.config.use_final_decision:
+                decision = _resolve_final_decision(
+                    technical_signal=signal["signal"],
+                    technical_confidence=signal.get("confidence", 0.5),
+                    regime=regime.value,
+                    macro_result=macro,
                 )
-                # Store macro bias in signal for trade record
-                signal["macro_bias"] = macro.get("macro_bias", "NEUTRAL")
+                final_dec = decision["final_decision"]
+                # WAIT → skip trade (low confidence / neutral signal)
+                if final_dec == "WAIT":
+                    self._record_rejection("MACRO_WAIT", ts, regime.value)
+                    return None
+                # Override: macro overrides weak tech signal
+                if final_dec != signal["signal"]:
+                    signal["signal"] = final_dec
+                # Adjust confidence based on decision confidence
+                # (affects position sizing, not gatekeeping)
+                dec_conf = decision["decision_confidence"] / 100.0
+                if 0 < dec_conf < signal.get("confidence", 0.5):
+                    signal["confidence"] = dec_conf
 
-                # Final Decision: resolve tech × macro conflict
-                if self.config.use_final_decision:
-                    decision = _resolve_final_decision(
-                        technical_signal=signal["signal"],
-                        technical_confidence=signal.get("confidence", 0.5),
-                        regime=regime.value,
-                        macro_result=macro,
-                    )
-                    final_dec = decision["final_decision"]
-                    # WAIT → skip trade (low confidence / neutral signal)
-                    if final_dec == "WAIT":
-                        return None
-                    # Override: macro overrides weak tech signal
-                    if final_dec != signal["signal"]:
-                        signal["signal"] = final_dec
-                    # Adjust confidence based on decision confidence
-                    # (affects position sizing, not gatekeeping)
-                    dec_conf = decision["decision_confidence"] / 100.0
-                    if 0 < dec_conf < signal.get("confidence", 0.5):
-                        signal["confidence"] = dec_conf
-
-            # Market Regime × Session Cross Filter (Priority 7)
-            if self.config.use_regime_session_filter and self.config.regime_session_allowed:
-                session = get_session_name(current_row["timestamp"])
-                allowed = self.config.regime_session_allowed.get(session)
-                if allowed is not None:
-                    if regime.value not in allowed:
-                        return None
+        # Market Regime × Session Cross Filter (Priority 7)
+        if self.config.use_regime_session_filter and self.config.regime_session_allowed:
+            session = get_session_name(ts)
+            allowed = self.config.regime_session_allowed.get(session)
+            if allowed is not None and regime.value not in allowed:
+                self._record_rejection("REGIME_SESSION", ts, regime.value, session)
+                return None
 
         return signal
 

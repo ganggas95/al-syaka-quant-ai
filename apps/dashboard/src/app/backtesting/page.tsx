@@ -5,6 +5,7 @@ import { EquityCurve } from "@/components/charts/equity-curve";
 import { MonthlyHeatmap } from "@/components/charts/monthly-heatmap";
 import { PerfStats } from "@/components/charts/perf-stats";
 import { SessionBreakdown } from "@/components/charts/session-breakdown";
+import { SignalBreakdown } from "@/components/charts/signal-breakdown";
 import { BacktestProgress } from "@/components/shared/backtest-progress";
 import {
     AlertTriangle,
@@ -81,6 +82,12 @@ interface BacktestResult {
     low: number;
     close: number;
   }>;
+  signal_breakdown: {
+    total_signal_checks: number;
+    total_signals_taken: number;
+    breakdown: Record<string, { count: number; percentage: number }>;
+    raw_counts: Record<string, number>;
+  };
   trades: Array<{
     entry_time: string;
     exit_time?: string;
@@ -332,6 +339,11 @@ export default function BacktestingPage() {
           {/* Session Breakdown */}
           {result.session_breakdown && (
             <SessionBreakdown data={result.session_breakdown} />
+          )}
+
+          {/* Signal Loss Breakdown */}
+          {result.signal_breakdown && (
+            <SignalBreakdown data={result.signal_breakdown} />
           )}
 
           {/* Trades Table */}
