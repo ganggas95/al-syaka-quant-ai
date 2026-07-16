@@ -34,6 +34,8 @@ class BacktestMetrics:
     sharpe_ratio: float = 0.0
     sortino_ratio: float = 0.0
     calmar_ratio: float = 0.0
+    recovery_factor: float = 0.0     # Net Profit / Max Drawdown
+    expectancy: float = 0.0          # (WR × AvgWin) - (LR × AvgLoss)
 
     # Time metrics
     start_date: Optional[datetime] = None
@@ -79,6 +81,10 @@ class MetricsCalculator:
         m.avg_win = sum(t.profit for t in winning) / len(winning) if winning else 0
         m.avg_loss = sum(abs(t.profit) for t in losing) / len(losing) if losing else 0
 
+        # Expectancy = (WR × AvgWin) - (LR × AvgLoss)
+        loss_rate = m.losing_trades / m.total_trades if m.total_trades > 0 else 0
+        m.expectancy = (m.win_rate * m.avg_win) - (loss_rate * m.avg_loss)
+
         # Best / worst
         if profits:
             m.best_trade = max(profits)
@@ -108,6 +114,7 @@ class MetricsCalculator:
             drawdown_pct = drawdown / peak * 100
             m.max_drawdown = np.max(drawdown)
             m.max_drawdown_percent = np.max(drawdown_pct)
+            m.recovery_factor = m.net_profit / m.max_drawdown if m.max_drawdown > 0 else 0.0
 
         # Sharpe Ratio (annualized, assuming daily returns)
         if len(equity_curve) > 1:

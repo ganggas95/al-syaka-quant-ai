@@ -39,6 +39,9 @@ class TradeRecord:
     session: str = ""  # ASIA, LONDON, NEWYORK
     regime: str = ""  # TRENDING, SIDEWAYS, etc.
     partial_closed: bool = False  # True after partial close executed
+    # Trailing stop state (Iteration 007)
+    trailing_active: bool = False  # True after trailing is activated
+    peak_price: float = 0.0        # Highest (LONG) or lowest (SHORT) price since trailing
     # Trade Attribution metadata (captured at entry time)
     adx_at_entry: float = 0.0
     atr_at_entry: float = 0.0
